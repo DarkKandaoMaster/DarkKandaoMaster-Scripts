@@ -1,0 +1,59 @@
+轻雀文档（qingque.cn）是协同文档编辑器，跟 Notion/飞书一类，块结构嵌套很深、虚拟滚动，所以我给的“抓直接子块”选择器只命中了一个表格。让我先确认两条更省事的路，再给你改进的脚本。
+正文是 JS 通过接口异步加载的
+按绝对位置给每个内容块编号（滚动时也能保持顺序+去重），并把表格整块抓取。
+
+轻雀只读文档保存到本地：
+
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // 1. 找滚动容器
+  const scroller = [document.scrollingElement, ...document.querySelectorAll('div,main,section')]
+    .filter(el => el && el.scrollHeight > el.clientHeight + 300)
+    .sort((a,b) => (b.scrollHeight-b.clientHeight)-(a.scrollHeight-a.clientHeight))[0]
+    || document.scrollingElement;
+  console.log('滚动容器:', scroller.tagName, scroller.className || '(document)');
+
+  // 2. 按“绝对位置”收集内容块：滚过去被回收也不丢、能保持顺序
+  const blocks = new Map();               // key=内容 -> {top, html}
+  const grab = () => {
+    const base = scroller.getBoundingClientRect().top - scroller.scrollTop;
+    scroller.querySelectorAll('table, img, figure, pre, blockquote, h1,h2,h3,h4,h5,h6, p, li')
+      .forEach(node => {
+        // 表格/图片整块抓，避免把表格内部的 p 拆开重复
+        if (node.closest('table') && node.tagName !== 'TABLE') return;
+        if (node.tagName === 'LI' && node.querySelector('li')) return;
+        const text = node.innerText?.trim() || node.querySelector('img') ? node.outerHTML : '';
+        const t = node.innerText?.trim();
+        if (!t && !node.querySelector('img,table')) return;
+        const key = (node.tagName) + '|' + (t?.length||0) + '|' + (t||'').slice(0,120);
+        if (blocks.has(key)) return;
+        node.querySelectorAll('img[data-src]').forEach(i => { if(!i.src) i.src=i.dataset.src; });
+        node.querySelectorAll('img[src]').forEach(i => i.src = i.src);   // 相对→绝对
+        const top = node.getBoundingClientRect().top - base;            // 文档内绝对纵坐标
+        blocks.set(key, { top, html: node.outerHTML });
+      });
+  };
+
+  // 3. 从顶滚到底
+  scroller.scrollTo(0, 0); await sleep(400);
+  let lastTop = -1, same = 0;
+  for (let i = 0; i < 8000; i++) {
+    grab();
+    scroller.scrollBy(0, scroller.clientHeight * 0.8);
+    await sleep(550);                       // 网慢改 900
+    if (scroller.scrollTop === lastTop) { if (++same >= 8) break; }
+    else { same = 0; lastTop = scroller.scrollTop; }
+  }
+  grab();
+
+  // 4. 按位置排序，打包 HTML 自动下载
+  const ordered = [...blocks.values()].sort((a,b) => a.top - b.top).map(b => b.html);
+  const html = `<!doctype html><meta charset="utf-8"><base href="${location.href}">
+    <title>${document.title}</title>${ordered.join('\n')}`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([html], {type:'text/html'}));
+  a.download = (document.title||'doc') + '.html';
+  a.click();
+  console.log(`✅ 完成，收集 ${blocks.size} 个内容块，已按顺序下载 HTML`);
+})();
